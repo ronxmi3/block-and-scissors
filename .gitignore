@@ -42,3 +42,5 @@ haircut_escrow/build/
 .DS_Store
 Thumbs.db
 '@ | Set-Content .gitignoreBlock.py
+
+frontend/_receipt_upgrade_backup_*/
