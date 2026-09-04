@@ -1,5 +1,5 @@
 """
-Phase 2E haircut similarity engine with a stricter fine-grained fade analyzer.
+Phase 2F haircut similarity engine with a haircut-family gate plus fine-grained fade analyzer.
 
 Goals:
 - preserve Phase 2C robustness to hair colour, skin tone, background and profile direction;
@@ -7,7 +7,8 @@ Goals:
 - explicitly score fade height, side coverage and shortest/base length;
 - compare a side-of-head crop so the top/back style cannot drown out fade differences;
 - expose diagnostics so you can see WHY two cuts got different scores;
-- avoid visual-score saturation and make fade-family disagreements matter even when zero-shot confidence is modest.
+- avoid visual-score saturation and make fade-family disagreements matter even when zero-shot confidence is modest;
+- prevent high generic visual similarity from overriding an incompatible haircut family (for example mullet/wolf vs crop/buzz).
 
 This remains an MVP heuristic built on zero-shot OpenCLIP. It is not a fairness
 or quality guarantee and must be calibrated on a diverse labelled haircut set
@@ -64,6 +65,75 @@ ATTRIBUTE_GROUP_WEIGHTS = {
     "style": 0.45,
     "top_texture": 0.30,
     "back_length": 0.25,
+}
+
+# Phase 2F: discrete haircut-family compatibility. Distribution overlap alone is
+# too forgiving: CLIP can consider a buzz/crop and a mullet visually similar
+# because both images contain the same head/pose/fade. This matrix makes the
+# predicted haircut family materially affect settlement.
+STYLE_MATCH = {
+    ("mullet", "mullet"): 100.0,
+    ("wolf_cut", "wolf_cut"): 100.0,
+    ("textured_crop", "textured_crop"): 100.0,
+    ("crew_cut", "crew_cut"): 100.0,
+    ("buzz_cut", "buzz_cut"): 100.0,
+    ("slick_back", "slick_back"): 100.0,
+    ("pompadour", "pompadour"): 100.0,
+    ("long_hair", "long_hair"): 100.0,
+
+    ("mullet", "wolf_cut"): 82.0,
+    ("wolf_cut", "mullet"): 82.0,
+    ("textured_crop", "crew_cut"): 70.0,
+    ("crew_cut", "textured_crop"): 70.0,
+    ("crew_cut", "buzz_cut"): 68.0,
+    ("buzz_cut", "crew_cut"): 68.0,
+    ("textured_crop", "buzz_cut"): 45.0,
+    ("buzz_cut", "textured_crop"): 45.0,
+    ("slick_back", "pompadour"): 70.0,
+    ("pompadour", "slick_back"): 70.0,
+    ("wolf_cut", "long_hair"): 58.0,
+    ("long_hair", "wolf_cut"): 58.0,
+    ("mullet", "long_hair"): 50.0,
+    ("long_hair", "mullet"): 50.0,
+
+    # Deliberately incompatible families.
+    ("mullet", "textured_crop"): 24.0,
+    ("textured_crop", "mullet"): 24.0,
+    ("wolf_cut", "textured_crop"): 30.0,
+    ("textured_crop", "wolf_cut"): 30.0,
+    ("mullet", "crew_cut"): 12.0,
+    ("crew_cut", "mullet"): 12.0,
+    ("wolf_cut", "crew_cut"): 16.0,
+    ("crew_cut", "wolf_cut"): 16.0,
+    ("mullet", "buzz_cut"): 4.0,
+    ("buzz_cut", "mullet"): 4.0,
+    ("wolf_cut", "buzz_cut"): 6.0,
+    ("buzz_cut", "wolf_cut"): 6.0,
+    ("long_hair", "buzz_cut"): 2.0,
+    ("buzz_cut", "long_hair"): 2.0,
+    ("long_hair", "crew_cut"): 8.0,
+    ("crew_cut", "long_hair"): 8.0,
+    ("long_hair", "textured_crop"): 15.0,
+    ("textured_crop", "long_hair"): 15.0,
+}
+
+BACK_LENGTH_MATCH = {
+    ("very_short", "very_short"): 100.0,
+    ("short", "short"): 100.0,
+    ("medium", "medium"): 100.0,
+    ("long", "long"): 100.0,
+    ("very_short", "short"): 72.0,
+    ("short", "very_short"): 72.0,
+    ("short", "medium"): 55.0,
+    ("medium", "short"): 55.0,
+    ("medium", "long"): 62.0,
+    ("long", "medium"): 62.0,
+    ("very_short", "medium"): 25.0,
+    ("medium", "very_short"): 25.0,
+    ("short", "long"): 20.0,
+    ("long", "short"): 20.0,
+    ("very_short", "long"): 4.0,
+    ("long", "very_short"): 4.0,
 }
 
 
@@ -219,6 +289,7 @@ class ScoreResult:
     component_scores: Dict[str, float]
     attribute_similarities: Dict[str, float]
     attribute_predictions: Dict[str, Dict[str, str]]
+    style_gate: Dict[str, object]
     fade_analysis: Dict[str, object]
     device: str
     model: str
@@ -231,7 +302,7 @@ class HaircutScorer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         print(
-            f"[AI] Loading Phase 2E {CLIP_MODEL} / {CLIP_PRETRAINED} "
+            f"[AI] Loading Phase 2F {CLIP_MODEL} / {CLIP_PRETRAINED} "
             f"on {self.device}..."
         )
 
@@ -249,7 +320,7 @@ class HaircutScorer:
             FADE_VISIBILITY_CHOICES
         )
 
-        print("[AI] Phase 2E fade precision analyzer ready.")
+        print("[AI] Phase 2F haircut-family gate + fade analyzer ready.")
 
     @staticmethod
     def _load_image(image_bytes: bytes) -> Image.Image:
@@ -600,13 +671,10 @@ class HaircutScorer:
         )
 
         attribute_similarities: Dict[str, float] = {}
-        attribute_score = 0.0
         for group in ATTRIBUTE_GROUPS:
-            similarity = self._distribution_overlap(
+            attribute_similarities[group] = self._distribution_overlap(
                 ref_profile[group], res_profile[group]
             )
-            attribute_similarities[group] = similarity
-            attribute_score += similarity * 100.0 * ATTRIBUTE_GROUP_WEIGHTS[group]
 
         attribute_predictions = {
             group: {
@@ -615,6 +683,34 @@ class HaircutScorer:
             }
             for group in ATTRIBUTE_GROUPS
         }
+
+        # Phase 2F: use discrete style/back-length compatibility as well as
+        # soft distribution overlap. This is the core fix for cases where a
+        # buzz/crop and a mullet looked generically similar enough to pass.
+        style_match = self._label_match_score(
+            ref_predictions["style"],
+            res_predictions["style"],
+            STYLE_MATCH,
+            different_default=38.0,
+        )
+        back_length_match = self._label_match_score(
+            ref_predictions["back_length"],
+            res_predictions["back_length"],
+            BACK_LENGTH_MATCH,
+            different_default=45.0,
+        )
+
+        style_overlap_score = attribute_similarities["style"] * 100.0
+        texture_overlap_score = attribute_similarities["top_texture"] * 100.0
+        back_overlap_score = attribute_similarities["back_length"] * 100.0
+
+        style_component = 0.40 * style_overlap_score + 0.60 * style_match
+        back_component = 0.50 * back_overlap_score + 0.50 * back_length_match
+        attribute_score = (
+            0.55 * style_component
+            + 0.20 * texture_overlap_score
+            + 0.25 * back_component
+        )
 
         # Dedicated side/fade analysis.
         (
@@ -684,14 +780,61 @@ class HaircutScorer:
         )
         fade_detail_score = max(0.0, min(100.0, fade_detail_score))
 
+        # Phase 2F haircut-family gate. A high image-embedding similarity must
+        # never overpower a clearly incompatible haircut family. Fade weight is
+        # also reduced when the side/fade is not actually visible in both photos.
+        style_gate_penalty = 0.0
+        style_gate_reasons: List[str] = []
+        score_cap = 100.0
+
+        if style_match <= 30.0 and back_length_match <= 55.0:
+            style_gate_penalty = 18.0
+            score_cap = 68.0
+            style_gate_reasons.append(
+                f"severe haircut-family + back-length mismatch: "
+                f"{ref_predictions['style']} vs {res_predictions['style']}; "
+                f"{ref_predictions['back_length']} vs {res_predictions['back_length']}"
+            )
+        elif style_match <= 30.0:
+            style_gate_penalty = 11.0
+            score_cap = 74.0
+            style_gate_reasons.append(
+                f"major haircut-family mismatch: {ref_predictions['style']} vs {res_predictions['style']}"
+            )
+        elif style_match <= 45.0 and back_length_match <= 55.0:
+            style_gate_penalty = 7.0
+            score_cap = 78.0
+            style_gate_reasons.append(
+                f"meaningful style/length mismatch: {ref_predictions['style']} vs {res_predictions['style']}"
+            )
+
+        fade_visibility = min(ref_visibility, res_visibility)
+        if fade_visibility < 0.45:
+            effective_weights = {"visual": 0.20, "attributes": 0.55, "fade_detail": 0.25}
+        else:
+            effective_weights = {"visual": 0.20, "attributes": 0.35, "fade_detail": 0.45}
+
         final_score = (
-            0.35 * visual_score
-            + 0.20 * attribute_score
-            + 0.45 * fade_detail_score
-            - 0.45 * mismatch_penalty
+            effective_weights["visual"] * visual_score
+            + effective_weights["attributes"] * attribute_score
+            + effective_weights["fade_detail"] * fade_detail_score
+            - 0.35 * mismatch_penalty
+            - style_gate_penalty
         )
-        final_score = max(0.0, min(100.0, final_score))
+        final_score = min(score_cap, max(0.0, min(100.0, final_score)))
         score = int(round(final_score))
+
+        style_gate = {
+            "style_match_score": style_match,
+            "back_length_match_score": back_length_match,
+            "style_component_score": style_component,
+            "back_component_score": back_component,
+            "penalty": style_gate_penalty,
+            "score_cap": score_cap,
+            "reasons": style_gate_reasons,
+            "fade_visibility": fade_visibility,
+            "effective_weights": effective_weights,
+        }
 
         fade_predictions = {
             group: {
@@ -756,7 +899,8 @@ class HaircutScorer:
             },
             attribute_similarities=attribute_similarities,
             attribute_predictions=attribute_predictions,
+            style_gate=style_gate,
             fade_analysis=fade_analysis,
             device=self.device,
-            model=f"{CLIP_MODEL}:{CLIP_PRETRAINED}:phase2e-fade-precision",
+            model=f"{CLIP_MODEL}:{CLIP_PRETRAINED}:phase2f-haircut-family-gate",
         )

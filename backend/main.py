@@ -1,4 +1,4 @@
-"""Phase 2E FastAPI backend with stricter fade precision diagnostics."""
+"""Phase 2F FastAPI backend with haircut-family gating and fade precision diagnostics."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from config import MAX_IMAGE_BYTES, ORACLE_API_KEY, SUI_THRESHOLD
 
 app = FastAPI(
     title="AI Haircut Escrow Oracle",
-    version="0.5.0-phase2e-fade-precision",
+    version="0.6.0-phase2f-haircut-family-gate",
 )
 
 app.add_middleware(
@@ -75,6 +75,7 @@ def _score_payload(score_result) -> dict:
             key: round(value, 4) for key, value in score_result.attribute_similarities.items()
         },
         "attribute_predictions": score_result.attribute_predictions,
+        "style_gate": _rounded_nested(score_result.style_gate),
         "fade_analysis": _rounded_nested(score_result.fade_analysis),
         "threshold": SUI_THRESHOLD,
         "predicted_outcome": (
@@ -83,9 +84,10 @@ def _score_payload(score_result) -> dict:
         "model": score_result.model,
         "device": score_result.device,
         "warning": (
-            "Phase 2E is an MVP haircut/fade similarity score, not a probability, "
-            "craftsmanship guarantee, or fairness guarantee. It uses stricter fade taxonomy "
-            "penalties but still requires calibration on a diverse labelled test set before real-money use."
+            "Phase 2F is an MVP haircut/fade similarity score, not a probability, "
+            "craftsmanship guarantee, or fairness guarantee. It adds a haircut-family gate so "
+            "generic visual similarity cannot override a major style/length mismatch, but it still "
+            "requires calibration on a diverse labelled test set before real-money use."
         ),
     }
 
@@ -103,7 +105,7 @@ def health() -> dict:
 
     return {
         "backend": "ok",
-        "ai_version": "phase2e-fade-precision",
+        "ai_version": "phase2f-haircut-family-gate",
         "sui_ok": sui_ok,
         "sui": sui,
         "sui_error": sui_error,
