@@ -1,5 +1,5 @@
 """
-Phase 2F haircut similarity engine with a haircut-family gate plus fine-grained fade analyzer.
+Phase 2G haircut similarity engine with a haircut-family gate plus fine-grained fade analyzer.
 
 Goals:
 - preserve Phase 2C robustness to hair colour, skin tone, background and profile direction;
@@ -67,7 +67,7 @@ ATTRIBUTE_GROUP_WEIGHTS = {
     "back_length": 0.25,
 }
 
-# Phase 2F: discrete haircut-family compatibility. Distribution overlap alone is
+# Phase 2G: discrete haircut-family compatibility. Distribution overlap alone is
 # too forgiving: CLIP can consider a buzz/crop and a mullet visually similar
 # because both images contain the same head/pose/fade. This matrix makes the
 # predicted haircut family materially affect settlement.
@@ -183,6 +183,18 @@ FADE_GROUPS: Dict[str, List[Tuple[str, str]]] = {
         ("long_taper", "the shortest area still keeps noticeable hair length as in a gentle taper"),
         ("none", "there is no distinct shortest fade or taper section"),
     ],
+    "blend_extent": [
+        ("localized_taper", "a localized taper where the blend is concentrated at the temple and around the ear while most of the side stays longer"),
+        ("partial_side", "a fade that spreads through the lower side but does not remove bulk across the entire side"),
+        ("broad_side", "a full fade where the clipper gradient spreads broadly across most of the side of the head"),
+        ("none", "no visible blend extent because the side is not faded or tapered"),
+    ],
+    "side_retention": [
+        ("retained_bulk", "most hair above the temple and ear remains visibly longer and full, as in a low taper"),
+        ("reduced_bulk", "the side hair above and around the ear is noticeably shortened by a fade"),
+        ("clipper_short", "most of the visible side is clipper short with very little retained bulk"),
+        ("none", "no meaningful side-retention pattern is visible"),
+    ],
     "blend_quality": [
         ("clean", "a technically clean fade with a smooth seamless blend and no visible weight line"),
         ("slight_banding", "a mostly clean fade with a faint visible transition band or weight line"),
@@ -192,11 +204,13 @@ FADE_GROUPS: Dict[str, List[Tuple[str, str]]] = {
 }
 
 FADE_GROUP_WEIGHTS = {
-    "fade_family": 0.40,
-    "fade_height": 0.20,
-    "fade_coverage": 0.20,
-    "base_length": 0.10,
-    "blend_quality": 0.10,
+    "fade_family": 0.30,
+    "fade_height": 0.15,
+    "fade_coverage": 0.15,
+    "base_length": 0.08,
+    "blend_extent": 0.15,
+    "side_retention": 0.10,
+    "blend_quality": 0.07,
 }
 
 FADE_FAMILY_MATCH = {
@@ -242,6 +256,55 @@ FADE_COVERAGE_MATCH = {
     ("full_side", "temple_and_ear"): 55.0,
     ("temple_only", "full_side"): 25.0,
     ("full_side", "temple_only"): 25.0,
+}
+
+BLEND_EXTENT_MATCH = {
+    ("localized_taper", "localized_taper"): 100.0,
+    ("partial_side", "partial_side"): 100.0,
+    ("broad_side", "broad_side"): 100.0,
+    ("none", "none"): 100.0,
+    ("localized_taper", "partial_side"): 60.0,
+    ("partial_side", "localized_taper"): 60.0,
+    ("partial_side", "broad_side"): 55.0,
+    ("broad_side", "partial_side"): 55.0,
+    ("localized_taper", "broad_side"): 18.0,
+    ("broad_side", "localized_taper"): 18.0,
+}
+
+SIDE_RETENTION_MATCH = {
+    ("retained_bulk", "retained_bulk"): 100.0,
+    ("reduced_bulk", "reduced_bulk"): 100.0,
+    ("clipper_short", "clipper_short"): 100.0,
+    ("none", "none"): 100.0,
+    ("retained_bulk", "reduced_bulk"): 38.0,
+    ("reduced_bulk", "retained_bulk"): 38.0,
+    ("reduced_bulk", "clipper_short"): 65.0,
+    ("clipper_short", "reduced_bulk"): 65.0,
+    ("retained_bulk", "clipper_short"): 15.0,
+    ("clipper_short", "retained_bulk"): 15.0,
+}
+
+# Multiple descriptions per class give CLIP a more explicit low-fade vs low-taper
+# contrast than a single generic prompt.
+FADE_FAMILY_ENSEMBLE = {
+    "full_fade": [
+        "a low full fade where the clipper gradient spreads across most of the side of the head",
+        "a full side fade with hair shortened broadly above and around the ear, not just at the temple",
+        "a low fade with a wide blended area and visibly reduced side bulk",
+    ],
+    "taper_fade": [
+        "a low taper fade localized at the temple and around the ear while the side hair above stays longer",
+        "a low taper with most side bulk retained and only the lower temple edge faded",
+        "a temple-focused taper fade, not a full fade across the whole side",
+    ],
+    "classic_taper": [
+        "a classic taper with gentle shortening mainly at the temple and neckline",
+        "a traditional taper with longer side hair and no broad full-side fade",
+    ],
+    "no_fade": [
+        "a hairstyle with no visible fade or taper on the side",
+        "natural unblended side hair with no clipper fade",
+    ],
 }
 
 VISUAL_SCORE_ANCHORS = [
@@ -302,7 +365,7 @@ class HaircutScorer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         print(
-            f"[AI] Loading Phase 2F {CLIP_MODEL} / {CLIP_PRETRAINED} "
+            f"[AI] Loading Phase 2G {CLIP_MODEL} / {CLIP_PRETRAINED} "
             f"on {self.device}..."
         )
 
@@ -316,11 +379,14 @@ class HaircutScorer:
         self.tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
         self.attribute_text_features = self._build_text_features(ATTRIBUTE_GROUPS)
         self.fade_text_features = self._build_text_features(FADE_GROUPS)
+        self.fade_family_ensemble_features = self._build_ensemble_text_features(
+            FADE_FAMILY_ENSEMBLE
+        )
         self.fade_visibility_features = self._encode_prompt_choices(
             FADE_VISIBILITY_CHOICES
         )
 
-        print("[AI] Phase 2F haircut-family gate + fade analyzer ready.")
+        print("[AI] Phase 2G haircut-family + taper-vs-fade signature analyzer ready.")
 
     @staticmethod
     def _load_image(image_bytes: bytes) -> Image.Image:
@@ -407,6 +473,27 @@ class HaircutScorer:
             group: self._encode_prompt_choices(choices)
             for group, choices in groups.items()
         }
+
+    def _build_ensemble_text_features(
+        self,
+        classes: Dict[str, List[str]],
+    ) -> Tuple[List[str], torch.Tensor]:
+        labels: List[str] = []
+        vectors: List[torch.Tensor] = []
+        for label, descriptions in classes.items():
+            prompts = [
+                f"A close-up professional barber photograph clearly showing {description}."
+                for description in descriptions
+            ]
+            with torch.inference_mode():
+                tokens = self.tokenizer(prompts).to(self.device)
+                features = self.model.encode_text(tokens)
+                features = features / features.norm(dim=-1, keepdim=True)
+                mean_feature = features.mean(dim=0)
+                mean_feature = mean_feature / mean_feature.norm()
+            labels.append(label)
+            vectors.append(mean_feature)
+        return labels, torch.stack(vectors)
 
     @staticmethod
     def _interpolate_score(raw_similarity: float, anchors: List[Tuple[float, float]]) -> float:
@@ -526,6 +613,18 @@ class HaircutScorer:
             self.fade_text_features,
             temperature=42.0,
         )
+
+        # Phase 2G: replace the single-prompt fade-family distribution with an
+        # ensemble classifier explicitly contrasting a broad full fade with a
+        # localized low taper.
+        family_labels, family_features = self.fade_family_ensemble_features
+        family_logits = 46.0 * (feature @ family_features.T)
+        family_probs = torch.softmax(family_logits, dim=-1)
+        distributions["fade_family"] = family_probs
+        family_index = int(torch.argmax(family_probs).detach().cpu().item())
+        predictions["fade_family"] = family_labels[family_index]
+        confidences["fade_family"] = float(family_probs[family_index].detach().cpu().item())
+
         return fade_view, distributions, predictions, confidences, visibility
 
     @staticmethod
@@ -642,6 +741,83 @@ class HaircutScorer:
 
         return penalty, reasons
 
+    @staticmethod
+    def _probability_for(
+        distribution: torch.Tensor,
+        labels: List[str],
+        label: str,
+    ) -> float:
+        index = labels.index(label)
+        return float(distribution[index].detach().cpu().item())
+
+    def _taper_fade_signature(
+        self,
+        ref_profile: Dict[str, torch.Tensor],
+        res_profile: Dict[str, torch.Tensor],
+        ref_predictions: Dict[str, str],
+        res_predictions: Dict[str, str],
+        visibility: float,
+    ) -> Dict[str, object]:
+        family_labels = [label for label, _ in FADE_GROUPS["fade_family"]]
+        extent_labels = [label for label, _ in FADE_GROUPS["blend_extent"]]
+        retention_labels = [label for label, _ in FADE_GROUPS["side_retention"]]
+
+        def contrast(profile, labels, positive, negative):
+            return (
+                self._probability_for(profile, labels, positive)
+                - self._probability_for(profile, labels, negative)
+            )
+
+        ref_family = contrast(ref_profile["fade_family"], family_labels, "full_fade", "taper_fade")
+        res_family = contrast(res_profile["fade_family"], family_labels, "full_fade", "taper_fade")
+        ref_extent = contrast(ref_profile["blend_extent"], extent_labels, "broad_side", "localized_taper")
+        res_extent = contrast(res_profile["blend_extent"], extent_labels, "broad_side", "localized_taper")
+        ref_retention = contrast(ref_profile["side_retention"], retention_labels, "reduced_bulk", "retained_bulk")
+        res_retention = contrast(res_profile["side_retention"], retention_labels, "reduced_bulk", "retained_bulk")
+
+        family_gap = abs(ref_family - res_family)
+        extent_gap = abs(ref_extent - res_extent)
+        retention_gap = abs(ref_retention - res_retention)
+        signature_distance = 0.50 * family_gap + 0.30 * extent_gap + 0.20 * retention_gap
+
+        penalty = 0.0
+        score_cap = 100.0
+        reasons: List[str] = []
+        family_pair = {ref_predictions["fade_family"], res_predictions["fade_family"]}
+
+        # If the side is reasonably visible, a full fade vs taper fade is a
+        # material mismatch even when the rest of the haircut is identical.
+        if visibility >= 0.32 and family_pair == {"full_fade", "taper_fade"}:
+            penalty += 11.0
+            score_cap = min(score_cap, 76.0)
+            reasons.append("explicit full-fade vs taper-fade mismatch")
+
+        # Continuous structural signature catches cases where both images get
+        # the same top label but their blend spread / retained side bulk differ.
+        if visibility >= 0.32:
+            if signature_distance >= 0.34:
+                penalty += 10.0
+                score_cap = min(score_cap, 72.0)
+                reasons.append("strong taper-vs-fade structural signature mismatch")
+            elif signature_distance >= 0.24:
+                penalty += 7.0
+                score_cap = min(score_cap, 77.0)
+                reasons.append("moderate taper-vs-fade structural signature mismatch")
+            elif signature_distance >= 0.16:
+                penalty += 4.0
+                score_cap = min(score_cap, 81.0)
+                reasons.append("noticeable taper-vs-fade structural signature difference")
+
+        return {
+            "signature_distance": signature_distance,
+            "family_contrast": {"reference": ref_family, "result": res_family, "gap": family_gap},
+            "extent_contrast": {"reference": ref_extent, "result": res_extent, "gap": extent_gap},
+            "retention_contrast": {"reference": ref_retention, "result": res_retention, "gap": retention_gap},
+            "penalty": penalty,
+            "score_cap": score_cap,
+            "reasons": reasons,
+        }
+
     def compare(self, reference_bytes: bytes, result_bytes: bytes) -> ScoreResult:
         reference = self._load_image(reference_bytes)
         result = self._load_image(result_bytes)
@@ -684,7 +860,7 @@ class HaircutScorer:
             for group in ATTRIBUTE_GROUPS
         }
 
-        # Phase 2F: use discrete style/back-length compatibility as well as
+        # Phase 2G: use discrete style/back-length compatibility as well as
         # soft distribution overlap. This is the core fix for cases where a
         # buzz/crop and a mullet looked generically similar enough to pass.
         style_match = self._label_match_score(
@@ -750,14 +926,22 @@ class HaircutScorer:
             ref_fade_predictions["fade_coverage"], res_fade_predictions["fade_coverage"], FADE_COVERAGE_MATCH
         )
         base_match = 100.0 if ref_fade_predictions["base_length"] == res_fade_predictions["base_length"] else 55.0
+        extent_match = self._label_match_score(
+            ref_fade_predictions["blend_extent"], res_fade_predictions["blend_extent"], BLEND_EXTENT_MATCH
+        )
+        retention_match = self._label_match_score(
+            ref_fade_predictions["side_retention"], res_fade_predictions["side_retention"], SIDE_RETENTION_MATCH
+        )
         quality_match = 100.0 if ref_fade_predictions["blend_quality"] == res_fade_predictions["blend_quality"] else 62.0
 
         discrete_semantic_score = (
-            0.40 * family_match
-            + 0.20 * height_match
-            + 0.20 * coverage_match
-            + 0.10 * base_match
-            + 0.10 * quality_match
+            0.30 * family_match
+            + 0.15 * height_match
+            + 0.15 * coverage_match
+            + 0.08 * base_match
+            + 0.15 * extent_match
+            + 0.10 * retention_match
+            + 0.07 * quality_match
         )
         fade_semantic_score = 0.30 * overlap_semantic_score + 0.70 * discrete_semantic_score
 
@@ -773,6 +957,15 @@ class HaircutScorer:
             res_visibility,
         )
 
+        fade_visibility = min(ref_visibility, res_visibility)
+        taper_fade_signature = self._taper_fade_signature(
+            ref_fade_profile,
+            res_fade_profile,
+            ref_fade_predictions,
+            res_fade_predictions,
+            fade_visibility,
+        )
+
         fade_detail_score = (
             0.30 * fade_visual_score
             + 0.70 * fade_semantic_score
@@ -780,7 +973,7 @@ class HaircutScorer:
         )
         fade_detail_score = max(0.0, min(100.0, fade_detail_score))
 
-        # Phase 2F haircut-family gate. A high image-embedding similarity must
+        # Phase 2G haircut-family gate. A high image-embedding similarity must
         # never overpower a clearly incompatible haircut family. Fade weight is
         # also reduced when the side/fade is not actually visible in both photos.
         style_gate_penalty = 0.0
@@ -808,11 +1001,12 @@ class HaircutScorer:
                 f"meaningful style/length mismatch: {ref_predictions['style']} vs {res_predictions['style']}"
             )
 
-        fade_visibility = min(ref_visibility, res_visibility)
-        if fade_visibility < 0.45:
+        if fade_visibility < 0.32:
             effective_weights = {"visual": 0.20, "attributes": 0.55, "fade_detail": 0.25}
+        elif fade_visibility < 0.45:
+            effective_weights = {"visual": 0.17, "attributes": 0.43, "fade_detail": 0.40}
         else:
-            effective_weights = {"visual": 0.20, "attributes": 0.35, "fade_detail": 0.45}
+            effective_weights = {"visual": 0.15, "attributes": 0.35, "fade_detail": 0.50}
 
         final_score = (
             effective_weights["visual"] * visual_score
@@ -820,8 +1014,10 @@ class HaircutScorer:
             + effective_weights["fade_detail"] * fade_detail_score
             - 0.35 * mismatch_penalty
             - style_gate_penalty
+            - taper_fade_signature["penalty"]
         )
-        final_score = min(score_cap, max(0.0, min(100.0, final_score)))
+        combined_cap = min(score_cap, float(taper_fade_signature["score_cap"]))
+        final_score = min(combined_cap, max(0.0, min(100.0, final_score)))
         score = int(round(final_score))
 
         style_gate = {
@@ -831,6 +1027,7 @@ class HaircutScorer:
             "back_component_score": back_component,
             "penalty": style_gate_penalty,
             "score_cap": score_cap,
+            "combined_score_cap": combined_cap,
             "reasons": style_gate_reasons,
             "fade_visibility": fade_visibility,
             "effective_weights": effective_weights,
@@ -863,6 +1060,8 @@ class HaircutScorer:
                 "fade_height": height_match,
                 "fade_coverage": coverage_match,
                 "base_length": base_match,
+                "blend_extent": extent_match,
+                "side_retention": retention_match,
                 "blend_quality": quality_match,
             },
             "visibility": {
@@ -885,6 +1084,7 @@ class HaircutScorer:
             },
             "mismatch_penalty": mismatch_penalty,
             "mismatch_reasons": mismatch_reasons,
+            "taper_vs_fade_signature": taper_fade_signature,
         }
 
         return ScoreResult(
@@ -902,5 +1102,5 @@ class HaircutScorer:
             style_gate=style_gate,
             fade_analysis=fade_analysis,
             device=self.device,
-            model=f"{CLIP_MODEL}:{CLIP_PRETRAINED}:phase2f-haircut-family-gate",
+            model=f"{CLIP_MODEL}:{CLIP_PRETRAINED}:phase2g-taper-vs-fade-signature",
         )

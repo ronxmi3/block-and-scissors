@@ -1,4 +1,4 @@
-"""Phase 2F FastAPI backend with haircut-family gating and fade precision diagnostics."""
+"""Phase 2G FastAPI backend with haircut-family gating and fade precision diagnostics."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from config import MAX_IMAGE_BYTES, ORACLE_API_KEY, SUI_THRESHOLD
 
 app = FastAPI(
     title="AI Haircut Escrow Oracle",
-    version="0.6.0-phase2f-haircut-family-gate",
+    version="0.7.0-phase2g-taper-vs-fade-signature",
 )
 
 app.add_middleware(
@@ -84,8 +84,8 @@ def _score_payload(score_result) -> dict:
         "model": score_result.model,
         "device": score_result.device,
         "warning": (
-            "Phase 2F is an MVP haircut/fade similarity score, not a probability, "
-            "craftsmanship guarantee, or fairness guarantee. It adds a haircut-family gate so "
+            "Phase 2G is an MVP haircut/fade similarity score, not a probability, "
+            "craftsmanship guarantee, or fairness guarantee. It adds haircut-family and taper-vs-full-fade structural gates so "
             "generic visual similarity cannot override a major style/length mismatch, but it still "
             "requires calibration on a diverse labelled test set before real-money use."
         ),
@@ -105,7 +105,7 @@ def health() -> dict:
 
     return {
         "backend": "ok",
-        "ai_version": "phase2f-haircut-family-gate",
+        "ai_version": "phase2g-taper-vs-fade-signature",
         "sui_ok": sui_ok,
         "sui": sui,
         "sui_error": sui_error,
