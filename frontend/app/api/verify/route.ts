@@ -46,6 +46,23 @@ export async function POST(request: Request) {
     const text = await response.text();
     const contentType = response.headers.get('content-type') ?? 'application/json';
 
+    // The Move contract uses abort code 2 for an escrow that has already been
+    // resolved. Translate that expected contract rejection into a useful web
+    // response instead of surfacing it as a generic 500 error.
+    const abortCodeTwo =
+      text.includes('resolve_escrow') &&
+      text.includes('MoveAbort') &&
+      text.includes('}, 2)');
+    const alreadyResolved =
+      !response.ok && (text.includes('E_ALREADY_RESOLVED') || abortCodeTwo);
+
+    if (alreadyResolved) {
+      return NextResponse.json(
+        { detail: 'This escrow has already been resolved. Create a new escrow for another verification.' },
+        { status: 409 },
+      );
+    }
+
     return new Response(text, {
       status: response.status,
       headers: { 'content-type': contentType },
