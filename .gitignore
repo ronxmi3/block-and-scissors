@@ -1,0 +1,44 @@
+@'
+# =========================
+# Secrets
+# =========================
+backend/.env
+frontend/.env.local
+.env
+.env.local
+
+# Keep example env files
+!.env.example
+!backend/.env.example
+!frontend/.env.local.example
+
+# =========================
+# Python
+# =========================
+backend/.venv/
+.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# AI upgrade backups
+backend/backup-before-phase*/
+
+# =========================
+# Node / Next.js
+# =========================
+frontend/node_modules/
+frontend/.next/
+
+# =========================
+# Move build files
+# =========================
+haircut_escrow/build/
+
+# =========================
+# Editor / OS
+# =========================
+.vscode/
+.DS_Store
+Thumbs.db
+'@ | Set-Content .gitignoreBlock.py

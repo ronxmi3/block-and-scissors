@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+pillow
+torch
+torchvision
+open_clip_torch
