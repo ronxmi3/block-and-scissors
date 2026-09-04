@@ -1,18 +1,25 @@
 """
-Phase 2H haircut similarity engine with calibrated, proportional fade penalties.
+Phase 2I haircut similarity engine with confidence-aware fade fusion.
 
-Goals:
-- preserve Phase 2C robustness to hair colour, skin tone, background and profile direction;
-- explicitly separate FULL FADE vs TAPER FADE vs CLASSIC TAPER;
-- explicitly score fade height, side coverage and shortest/base length;
-- compare a side-of-head crop so the top/back style cannot drown out fade differences;
-- expose diagnostics so you can see WHY two cuts got different scores;
-- avoid visual-score saturation and make fade-family disagreements matter even when zero-shot confidence is modest;
-- prevent high generic visual similarity from overriding an incompatible haircut family (for example mullet/wolf vs crop/buzz).
+Phase 2H exposed an important failure mode: two genuinely similar curly mullets
+could receive a low score because weak zero-shot fade labels (for example
+``no_fade`` vs ``classic_taper``) were treated as hard facts. Phase 2I keeps the
+useful haircut-family and taper-vs-full-fade structural gates, but changes how
+uncertain fade evidence is fused.
+
+Key changes:
+- low-confidence discrete fade labels are down-weighted instead of dominating;
+- continuous distribution overlap gets more weight when label margins are weak;
+- discrete mismatch penalties are confidence-scaled;
+- the same mismatch is no longer charged twice in the final score;
+- when the overall haircut family/back length agree and the taper/fade signature
+  is only minor, fade detail cannot consume half of the entire score;
+- strong taper-vs-full-fade structural gaps and major haircut-family mismatches
+  still retain sub-80 caps.
 
 This remains an MVP heuristic built on zero-shot OpenCLIP. It is not a fairness
-or quality guarantee and must be calibrated on a diverse labelled haircut set
-before any real-money deployment.
+or craftsmanship guarantee and must be calibrated on a diverse labelled haircut
+set before any real-money deployment.
 """
 
 from __future__ import annotations
@@ -1002,12 +1009,38 @@ class HaircutScorer:
             + 0.10 * retention_match
             + 0.07 * quality_match
         )
-        fade_semantic_score = 0.30 * overlap_semantic_score + 0.70 * discrete_semantic_score
+
+        # Phase 2I: confidence-aware semantic fusion.
+        fade_confidence_margins = {
+            group: {
+                "reference": self._confidence_margin(ref_fade_profile[group]),
+                "result": self._confidence_margin(res_fade_profile[group]),
+            }
+            for group in FADE_GROUPS
+        }
+        mean_fade_margin = sum(
+            0.5 * (
+                fade_confidence_margins[group]["reference"]
+                + fade_confidence_margins[group]["result"]
+            )
+            for group in FADE_GROUPS
+        ) / max(1, len(FADE_GROUPS))
+
+        semantic_reliability = max(
+            0.0,
+            min(1.0, (mean_fade_margin - 0.05) / 0.18),
+        )
+        discrete_weight = 0.20 + 0.45 * semantic_reliability
+        overlap_weight = 1.0 - discrete_weight
+        fade_semantic_score = (
+            overlap_weight * overlap_semantic_score
+            + discrete_weight * discrete_semantic_score
+        )
 
         reference_blend_quality = self._expected_blend_quality(ref_fade_profile["blend_quality"])
         result_blend_quality = self._expected_blend_quality(res_fade_profile["blend_quality"])
 
-        mismatch_penalty, mismatch_reasons = self._fade_mismatch_penalty(
+        raw_mismatch_penalty, mismatch_reasons = self._fade_mismatch_penalty(
             ref_fade_predictions,
             res_fade_predictions,
             ref_fade_confidence,
@@ -1015,6 +1048,9 @@ class HaircutScorer:
             ref_visibility,
             res_visibility,
         )
+
+        mismatch_confidence_scale = 0.15 + 0.85 * semantic_reliability
+        mismatch_penalty = raw_mismatch_penalty * mismatch_confidence_scale
 
         fade_visibility = min(ref_visibility, res_visibility)
         taper_fade_signature = self._taper_fade_signature(
@@ -1028,7 +1064,7 @@ class HaircutScorer:
         fade_detail_score = (
             0.30 * fade_visual_score
             + 0.70 * fade_semantic_score
-            - 0.35 * mismatch_penalty
+            - 0.25 * mismatch_penalty
         )
         fade_detail_score = max(0.0, min(100.0, fade_detail_score))
 
@@ -1060,18 +1096,37 @@ class HaircutScorer:
                 f"meaningful style/length mismatch: {ref_predictions['style']} vs {res_predictions['style']}"
             )
 
+        same_haircut_structure = style_match >= 90.0 and back_length_match >= 90.0
+        signature_severity = str(taper_fade_signature["severity"])
+
         if fade_visibility < 0.32:
             effective_weights = {"visual": 0.20, "attributes": 0.55, "fade_detail": 0.25}
+        elif same_haircut_structure and signature_severity in {"none", "minor", "mild"}:
+            fade_weight = 0.30 + 0.10 * semantic_reliability
+            effective_weights = {
+                "visual": 0.20,
+                "attributes": 0.80 - fade_weight,
+                "fade_detail": fade_weight,
+            }
         elif fade_visibility < 0.45:
-            effective_weights = {"visual": 0.17, "attributes": 0.43, "fade_detail": 0.40}
+            fade_weight = 0.30 + 0.10 * semantic_reliability
+            effective_weights = {
+                "visual": 0.18,
+                "attributes": 0.82 - fade_weight,
+                "fade_detail": fade_weight,
+            }
         else:
-            effective_weights = {"visual": 0.15, "attributes": 0.35, "fade_detail": 0.50}
+            fade_weight = 0.35 + 0.12 * semantic_reliability
+            effective_weights = {
+                "visual": 0.17,
+                "attributes": 0.83 - fade_weight,
+                "fade_detail": fade_weight,
+            }
 
         final_score = (
             effective_weights["visual"] * visual_score
             + effective_weights["attributes"] * attribute_score
             + effective_weights["fade_detail"] * fade_detail_score
-            - 0.35 * mismatch_penalty
             - style_gate_penalty
             - taper_fade_signature["penalty"]
         )
@@ -1130,13 +1185,14 @@ class HaircutScorer:
             "detail_similarities": fade_detail_similarities,
             "predictions": fade_predictions,
             "confidence": fade_confidences,
-            "confidence_margin": {
-                group: {
-                    "reference": self._confidence_margin(ref_fade_profile[group]),
-                    "result": self._confidence_margin(res_fade_profile[group]),
-                }
-                for group in FADE_GROUPS
+            "confidence_margin": fade_confidence_margins,
+            "semantic_reliability": semantic_reliability,
+            "semantic_weights": {
+                "distribution_overlap": overlap_weight,
+                "discrete_labels": discrete_weight,
             },
+            "raw_mismatch_penalty": raw_mismatch_penalty,
+            "mismatch_confidence_scale": mismatch_confidence_scale,
             "blend_quality_score": {
                 "reference": reference_blend_quality,
                 "result": result_blend_quality,
@@ -1161,5 +1217,5 @@ class HaircutScorer:
             style_gate=style_gate,
             fade_analysis=fade_analysis,
             device=self.device,
-            model=f"{CLIP_MODEL}:{CLIP_PRETRAINED}:phase2h-calibrated-fade-penalties",
+            model=f"{CLIP_MODEL}:{CLIP_PRETRAINED}:phase2i-confidence-aware-fade-fusion",
         )

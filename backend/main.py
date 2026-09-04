@@ -84,9 +84,9 @@ def _score_payload(score_result) -> dict:
         "model": score_result.model,
         "device": score_result.device,
         "warning": (
-            "Phase 2H is an MVP haircut/fade similarity score, not a probability, "
-            "craftsmanship guarantee, or fairness guarantee. It keeps the haircut-family and taper-vs-full-fade structural gates, but calibrates small fade disagreements proportionally so "
-            "generic visual similarity cannot override a major style/length mismatch, but it still "
+            "Phase 2I is an MVP haircut/fade similarity score, not a probability, "
+            "craftsmanship guarantee, or fairness guarantee. It keeps the haircut-family and taper-vs-full-fade structural gates, but makes weak zero-shot fade labels confidence-aware so "
+            "uncertain fade labels cannot overpower a strong overall haircut match, while major structural mismatches still fail. It still "
             "requires calibration on a diverse labelled test set before real-money use."
         ),
     }
@@ -105,7 +105,7 @@ def health() -> dict:
 
     return {
         "backend": "ok",
-        "ai_version": "phase2h-calibrated-fade-penalties",
+        "ai_version": "phase2i-confidence-aware-fade-fusion",
         "sui_ok": sui_ok,
         "sui": sui,
         "sui_error": sui_error,
