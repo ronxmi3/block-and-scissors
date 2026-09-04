@@ -1,5 +1,5 @@
 """
-Phase 2G haircut similarity engine with a haircut-family gate plus fine-grained fade analyzer.
+Phase 2H haircut similarity engine with calibrated, proportional fade penalties.
 
 Goals:
 - preserve Phase 2C robustness to hair colour, skin tone, background and profile direction;
@@ -365,7 +365,7 @@ class HaircutScorer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         print(
-            f"[AI] Loading Phase 2G {CLIP_MODEL} / {CLIP_PRETRAINED} "
+            f"[AI] Loading Phase 2H {CLIP_MODEL} / {CLIP_PRETRAINED} "
             f"on {self.device}..."
         )
 
@@ -386,7 +386,7 @@ class HaircutScorer:
             FADE_VISIBILITY_CHOICES
         )
 
-        print("[AI] Phase 2G haircut-family + taper-vs-fade signature analyzer ready.")
+        print("[AI] Phase 2H calibrated fade-penalty analyzer ready.")
 
     @staticmethod
     def _load_image(image_bytes: bytes) -> Image.Image:
@@ -758,6 +758,25 @@ class HaircutScorer:
         res_predictions: Dict[str, str],
         visibility: float,
     ) -> Dict[str, object]:
+        """Calibrated taper-vs-full-fade mismatch signal.
+
+        Phase 2G correctly made the side treatment matter, but it could
+        over-penalize two genuinely similar low-taper / curly-mullet photos
+        whenever the discrete CLIP label flipped between ``taper_fade`` and
+        ``full_fade``.  Phase 2H therefore makes the penalty proportional to
+        the *continuous* structural difference instead of treating every label
+        disagreement as equally severe.
+
+        The structural signature combines:
+        - full-fade vs taper probability contrast,
+        - how broadly the blend spreads across the side,
+        - how much side bulk is retained.
+
+        A label mismatch with a small structural distance is treated as a
+        minor classifier disagreement.  A label mismatch backed by a large
+        structural distance remains a material mismatch and can still keep the
+        score below the 80 payout threshold.
+        """
         family_labels = [label for label, _ in FADE_GROUPS["fade_family"]]
         extent_labels = [label for label, _ in FADE_GROUPS["blend_extent"]]
         retention_labels = [label for label, _ in FADE_GROUPS["side_retention"]]
@@ -783,33 +802,73 @@ class HaircutScorer:
         penalty = 0.0
         score_cap = 100.0
         reasons: List[str] = []
+        severity = "none"
         family_pair = {ref_predictions["fade_family"], res_predictions["fade_family"]}
 
-        # If the side is reasonably visible, a full fade vs taper fade is a
-        # material mismatch even when the rest of the haircut is identical.
-        if visibility >= 0.32 and family_pair == {"full_fade", "taper_fade"}:
-            penalty += 11.0
-            score_cap = min(score_cap, 76.0)
-            reasons.append("explicit full-fade vs taper-fade mismatch")
+        if visibility < 0.32:
+            return {
+                "signature_distance": signature_distance,
+                "severity": "not_visible_enough",
+                "family_contrast": {"reference": ref_family, "result": res_family, "gap": family_gap},
+                "extent_contrast": {"reference": ref_extent, "result": res_extent, "gap": extent_gap},
+                "retention_contrast": {"reference": ref_retention, "result": res_retention, "gap": retention_gap},
+                "penalty": 0.0,
+                "score_cap": 100.0,
+                "reasons": ["fade side not visible enough for taper-vs-fade structural gating"],
+            }
 
-        # Continuous structural signature catches cases where both images get
-        # the same top label but their blend spread / retained side bulk differ.
-        if visibility >= 0.32:
-            if signature_distance >= 0.34:
-                penalty += 10.0
-                score_cap = min(score_cap, 72.0)
-                reasons.append("strong taper-vs-fade structural signature mismatch")
-            elif signature_distance >= 0.24:
-                penalty += 7.0
-                score_cap = min(score_cap, 77.0)
-                reasons.append("moderate taper-vs-fade structural signature mismatch")
-            elif signature_distance >= 0.16:
-                penalty += 4.0
-                score_cap = min(score_cap, 81.0)
-                reasons.append("noticeable taper-vs-fade structural signature difference")
+        # Full fade vs taper fade gets ONE proportional penalty ladder.  This
+        # avoids Phase 2G's double punishment (discrete mismatch + continuous
+        # mismatch) when the actual geometry is still very similar.
+        if family_pair == {"full_fade", "taper_fade"}:
+            if signature_distance >= 0.30:
+                penalty = 10.0
+                score_cap = 76.0
+                severity = "strong"
+                reasons.append("full-fade vs taper-fade mismatch strongly supported by side structure")
+            elif signature_distance >= 0.22:
+                penalty = 7.0
+                score_cap = 79.0
+                severity = "material"
+                reasons.append("full-fade vs taper-fade mismatch supported by side structure")
+            elif signature_distance >= 0.14:
+                penalty = 3.5
+                score_cap = 86.0
+                severity = "mild"
+                reasons.append("small full-fade vs taper-fade difference; softened because side structure remains close")
+            else:
+                penalty = 1.5
+                score_cap = 92.0
+                severity = "minor"
+                reasons.append("fade-family labels differ but structural signature is nearly the same")
+
+        # Even when the top family label is the same, a large side-structure
+        # gap should still matter.  These thresholds are deliberately softer
+        # than 2G for small differences and strict for genuinely broad ones.
+        elif signature_distance >= 0.34:
+            penalty = 8.0
+            score_cap = 78.0
+            severity = "strong"
+            reasons.append("strong taper-vs-fade structural signature mismatch")
+        elif signature_distance >= 0.26:
+            penalty = 5.0
+            score_cap = 82.0
+            severity = "material"
+            reasons.append("material taper-vs-fade structural signature mismatch")
+        elif signature_distance >= 0.18:
+            penalty = 2.5
+            score_cap = 88.0
+            severity = "mild"
+            reasons.append("mild taper-vs-fade structural difference")
+        elif signature_distance >= 0.12:
+            penalty = 1.0
+            score_cap = 94.0
+            severity = "minor"
+            reasons.append("minor taper-vs-fade structural difference")
 
         return {
             "signature_distance": signature_distance,
+            "severity": severity,
             "family_contrast": {"reference": ref_family, "result": res_family, "gap": family_gap},
             "extent_contrast": {"reference": ref_extent, "result": res_extent, "gap": extent_gap},
             "retention_contrast": {"reference": ref_retention, "result": res_retention, "gap": retention_gap},
@@ -860,7 +919,7 @@ class HaircutScorer:
             for group in ATTRIBUTE_GROUPS
         }
 
-        # Phase 2G: use discrete style/back-length compatibility as well as
+        # Phase 2H: use discrete style/back-length compatibility as well as
         # soft distribution overlap. This is the core fix for cases where a
         # buzz/crop and a mullet looked generically similar enough to pass.
         style_match = self._label_match_score(
@@ -973,7 +1032,7 @@ class HaircutScorer:
         )
         fade_detail_score = max(0.0, min(100.0, fade_detail_score))
 
-        # Phase 2G haircut-family gate. A high image-embedding similarity must
+        # Phase 2H haircut-family gate. A high image-embedding similarity must
         # never overpower a clearly incompatible haircut family. Fade weight is
         # also reduced when the side/fade is not actually visible in both photos.
         style_gate_penalty = 0.0
@@ -1102,5 +1161,5 @@ class HaircutScorer:
             style_gate=style_gate,
             fade_analysis=fade_analysis,
             device=self.device,
-            model=f"{CLIP_MODEL}:{CLIP_PRETRAINED}:phase2g-taper-vs-fade-signature",
+            model=f"{CLIP_MODEL}:{CLIP_PRETRAINED}:phase2h-calibrated-fade-penalties",
         )
