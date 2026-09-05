@@ -27,7 +27,7 @@ The flow is:
 The current default threshold is:
 
 ```text
-70
+80
 ```
 
 The threshold itself is stored in the escrow when it is created.
@@ -477,7 +477,7 @@ Inside the application:
 
 During development:
 
-* ChatGPT was used for debugging, code suggestions, architecture discussions, testing help and documentation assistance.
+* ChatGPT was used for debugging, front end, testing help and documentation assistance.
 
 The final application flow, contract behaviour and transactions were tested using the actual running project on Sui testnet.
 
@@ -513,6 +513,8 @@ TODO
 
 ```text
 Rayyan Babar
+Hadia Bashir 
+Badr 
 ```
 
 ---
