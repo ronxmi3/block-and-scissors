@@ -445,6 +445,7 @@ The biggest ones are:
 * customers currently need a normal Sui wallet
 * there is no fiat/stablecoin off-ramp for barbers
 * production wallets and keys would need much stronger security
+* The Efficency is mainly limited to fades as of now
 
 ---
 
