@@ -502,10 +502,9 @@ This project is currently testnet only.
 
 ## Demo video
 
-Add demo link here: https://youtu.be/uM_TnW5ubX0
 
 ```text
-TODO
+https://youtu.be/uM_TnW5ubX0
 ```
 
 ---
