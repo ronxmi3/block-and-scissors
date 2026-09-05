@@ -6,7 +6,7 @@ Blocks & Scissors is a small experiment I built around a pretty simple question:
 
 The idea is to lock the payment in escrow before the haircut happens, compare the finished haircut against the reference using AI, and then let a smart contract handle the payment based on the result.
 
-This project was built for the MUBA Blockchain Hackathon 2026, Sui Track.
+This project was built for the MUBA Blockchain Hackathon 2026, AI X Sui Track.
 
 ---
 
@@ -514,7 +514,7 @@ https://youtu.be/uM_TnW5ubX0
 ```text
 Rayyan Babar
 Hadia Bashir 
-Badr 
+Badr Naji
 ```
 
 ---
