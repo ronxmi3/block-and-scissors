@@ -1,6 +1,6 @@
 # Blocks & Scissors
 
-Blocks & Scissors is a small experiment I built around a pretty simple question:
+Blocks & Scissors is a small experiment we built around a pretty simple question:
 
 **What happens if a customer and a barber disagree about whether a haircut actually matches the reference photo?**
 
