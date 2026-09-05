@@ -410,7 +410,7 @@ Reference haircut
         +
 Similar result
         ↓
-AI score above 70
+AI score above Threshold(80)
         ↓
 Barber paid
 ```
@@ -422,7 +422,7 @@ Reference haircut
         +
 Clearly different result
         ↓
-AI score below 70
+AI score below Threshold (80)
         ↓
 Customer refunded
 ```
@@ -501,7 +501,7 @@ This project is currently testnet only.
 
 ## Demo video
 
-Add demo link here:
+Add demo link here: https://youtu.be/uM_TnW5ubX0
 
 ```text
 TODO
